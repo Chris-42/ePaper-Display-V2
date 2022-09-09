@@ -74,6 +74,7 @@ struct imagedata_t {
 };
 
 RTC_DATA_ATTR char rtc_contenthash[34];
+RTC_DATA_ATTR uint32_t rtc_image_time;
 
 Preferences preferences;
 struct wificonfig_t wificonfig;
