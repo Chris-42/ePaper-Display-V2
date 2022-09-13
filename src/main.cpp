@@ -83,6 +83,7 @@ struct serverconfig_t serverconfig;
 bool in_otau = false;
 uint32_t wifi_start = 0;
 uint32_t setup_fin = 0;
+uint32_t next_draw = 0;
 int bat_mV = 0;
 int portal_on_time_ms = 180000;
 bool is_loading = false;
@@ -593,17 +594,7 @@ int fetch_image(struct imagedata_t *im) {
   return (0);
 }
 
-void WiFiGotIP(WiFiEvent_t event, WiFiEventInfo_t info) {
-  SERIALPRINTLN("WiFi connected");
-  //Serial.printf("WiFiIP: %lu\r\n", millis());
-  SERIALPRINT("IP address: ");
-  SERIALPRINTLN(IPAddress(info.got_ip.ip_info.ip.addr));
-  SERIALPRINT("Hostname: ");
-  SERIALPRINTLN(WiFi.getHostname());
-  wifi_wait = false;
-  //  local_IP = info.got_ip.ip_info.ip.addr;
-  //  subnet = info.got_ip.ip_info.netmask.addr;
-  //  gateway = info.got_ip.ip_info.gw.addr;
+void fetchAndDraw() {
   if(server_is_configured) {
     imagedata_t image;
     int ret = fetch_image(&image);
@@ -622,13 +613,30 @@ void WiFiGotIP(WiFiEvent_t event, WiFiEventInfo_t info) {
     } else {
       displayInfo(NoHttpResponse);
     }
-    Serial.printf("sleep %d seconds\r\n", image.sleep);
     if(!is_loading) {
+      Serial.printf("sleep %d seconds\r\n", image.sleep);
       go_to_sleep(image.sleep);
+    } else {
+      Serial.printf("no sleep %d seconds because usb connected\r\n", image.sleep);
+      next_draw = millis() + image.sleep * 1000;
     }
   } else {
     displayInfo(NoServerConfig);
   }
+}
+
+void WiFiGotIP(WiFiEvent_t event, WiFiEventInfo_t info) {
+  SERIALPRINTLN("WiFi connected");
+  //Serial.printf("WiFiIP: %lu\r\n", millis());
+  SERIALPRINT("IP address: ");
+  SERIALPRINTLN(IPAddress(info.got_ip.ip_info.ip.addr));
+  SERIALPRINT("Hostname: ");
+  SERIALPRINTLN(WiFi.getHostname());
+  wifi_wait = false;
+  //  local_IP = info.got_ip.ip_info.ip.addr;
+  //  subnet = info.got_ip.ip_info.netmask.addr;
+  //  gateway = info.got_ip.ip_info.gw.addr;
+  fetchAndDraw();
 }
 
 void setup() {
@@ -745,10 +753,12 @@ void loop() {
     SERIALPRINTLN("WiFi Connection Failed! Delayed Rebooting...");
     go_to_sleep(10);
   }
-  //if(digitalRead(KEY)) {
-  //  go_to_sleep(10);
-    //ESP.restart();
-  //}
+  if(next_draw && (ti > next_draw)) {
+    fetchAndDraw();
+  }
+  if(digitalRead(KEY)) {
+    ESP.restart();
+  }
   if(is_loading && !IS_USB_CONNECTED) {
     ESP.restart();
   }
