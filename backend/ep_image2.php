@@ -219,11 +219,12 @@ header( "HTTP/1.0 200 OK" );
 header ("Content-type: image/bmp");
 #header ("Content-type: image/png");
 #imagecopyresampled($im, $im0, 0, 0, 0, 0, 800, 480, imagesx($im0), imagesy($im0));
-#$im = @ImageCreateTrueColor (800, 480)
-$im = ImageCreateFromPNG($displayname . ".png")
+#$im = ImageCreateFromPNG($displayname . ".png")
+$im = @ImageCreateTrueColor (800, 480)
 or die ("Kann keinen neuen GD-Bild-Stream erzeugen");
 $background_color = ImageColorAllocate ($im, 255, 255, 255);
 $text_color = ImageColorAllocate ($im, 0, 0, 0);
+ImageFill($im, 0, 0, $background_color);
 if($displayname == "Mirror") {
     imagettftext ($im , 40 , 90 , 130 , 320 , $text_color , $fontR , $todaystr );
     if($rows) {
@@ -242,10 +243,10 @@ if($displayname == "Mirror") {
         ImageFilledRectangle($im, 628, 33 - $bat_bar, 635, 33, $text_color);
     }
 } else {
-    ImageRectangle($im, 0, 0, 639, 383, $text_color);
+    ImageRectangle($im, 0, 0, 799, 479, $text_color);
     #imagettftext ($im , 40 , 0 , 31 , 70 , $text_color , $fontB , "Raum " . $displayname);
     imagettftext ($im , 40 , 0 , 31 , 60 , $text_color , $fontB , "Casa Port");
-    ImageFilledRectangle($im, 370, 20, 638, 70, $background_color);
+    //ImageFilledRectangle($im, 370, 20, 638, 70, $background_color);
     imagettftext ($im , 32 , 0 , 410 , 60 , $text_color , $fontR , $todaystr );
 
     ImageFilledRectangle($im, 0, 80, 639, 82, $text_color);
@@ -282,6 +283,20 @@ if($displayname == "Mirror") {
 }
 
 #imagePNG($im);
+if(1) {
+    imagefilter($im, IMG_FILTER_GRAYSCALE);
+    imagetruecolortopalette($im, false, 2);
+    header ("Content-type: image/png");
+    ob_start();
+    imagePNG($im);
+    $blob = ob_get_contents();
+    error_log(ob_get_length());
+    header("Content-Length: " . ob_get_length());
+    ob_end_clean();
+    echo($blob);
+    exit;
+}
+  
 $l =  imagesx($im) * imagesy($im) / 8 + 62;
 header("Content-Length: " . $l);
 echo(imageBMP2($im, ($displayname == "Mirror")));

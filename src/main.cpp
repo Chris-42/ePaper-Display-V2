@@ -9,16 +9,18 @@
 #include <esp_sleep.h>
 #include <ArduinoOTA.h>
 #include <Preferences.h>
+#include <driver/uart.h>
+//#include <hal/uart_ll.h>
 
 #define ENABLE_GxEPD2_GFX 0
-
-#define VERSION "0.02"
+#define VERSION "0.03"
 
 #include <GxEPD2.h>
 #include <GxEPD2_BW.h>
 #include <GxEPD2_EPD.h>
 #include <GxEPD2_GFX.h>
 #include <Fonts/FreeMonoBold9pt7b.h>
+#include <PNGdec.h>
 
 #define DIN D10
 #define CLK D8 
@@ -43,9 +45,12 @@
 GxEPD2_BW<GxEPD2_750_T7, MAX_HEIGHT(GxEPD2_750_T7)> display(GxEPD2_750_T7(/*CS=*/ -1, /*DC=*/ DC, /*RST=*/ RST, /*BUSY=*/ BUSY));
 //GxEPD2_BW<GxEPD2_750, MAX_HEIGHT(GxEPD2_750)> display(GxEPD2_750(/*CS=*/ -1, /*DC=*/ DC, /*RST=*/ RST, /*BUSY=*/ BUSY));
 
+PNG png;
+
 struct wificonfig_t {
   char ssid[32];
   char password[32];
+  bool fake_fixed_ip;
 };
 
 struct serverconfig_t {
@@ -65,34 +70,52 @@ enum RunType {
   Normal
 };
 
+enum imagetype_t {UNKNOWN, BMP, PNG};
+
 struct imagedata_t {
   uint8_t *image;
   uint32_t sleep;
   uint32_t image_size;
   float newVersion;
   char contenthash[34];
+  imagetype_t type;
 };
 
 RTC_DATA_ATTR char rtc_contenthash[34];
-RTC_DATA_ATTR uint32_t rtc_image_time;
+RTC_DATA_ATTR char rtc_image_time[34];
+RTC_DATA_ATTR uint32_t rtc_wifi_fail;
+RTC_DATA_ATTR bool rtc_wifi_failed;
+RTC_DATA_ATTR uint32_t rtc_run_millis;
+RTC_DATA_ATTR uint32_t rtc_last_update_check;
+
+RTC_DATA_ATTR IPAddress local_IP = IPADDR_NONE;
+RTC_DATA_ATTR IPAddress gateway = IPADDR_NONE;
+RTC_DATA_ATTR IPAddress subnet = IPADDR_NONE;
+RTC_DATA_ATTR IPAddress dns1 = IPADDR_NONE;
+RTC_DATA_ATTR IPAddress dns2 = IPADDR_NONE;
 
 Preferences preferences;
 struct wificonfig_t wificonfig;
 struct serverconfig_t serverconfig;
 
+String wakeup_by;
+
 bool in_otau = false;
 uint32_t wifi_start = 0;
+uint32_t wifi_connect_time = 0; //statistic collection
 uint32_t setup_fin = 0;
 uint32_t next_draw = 0;
 int bat_mV = 0;
 int portal_on_time_ms = 180000;
 bool is_loading = false;
+bool uart_avail = false;
 bool wifi_wait = false;
 bool server_is_configured = false;
+int rssi = 0;
 
-#define SERIALPRINT(x) if(is_loading) Serial.print(x)
-#define SERIALPRINTLN(x) if(is_loading) Serial.println(x)
-#define SERIALPRINTF(...) if(is_loading) Serial.printf(__VA_ARGS__)
+#define SERIALPRINT(x) if(uart_avail) Serial.print(x)
+#define SERIALPRINTLN(x) if(uart_avail) Serial.println(x)
+#define SERIALPRINTF(...) if(uart_avail) Serial.printf(__VA_ARGS__)
 
 int get_wlan_config(struct wificonfig_t *wifi) {
   if(!preferences.begin("wificonfig", true)) {
@@ -105,6 +128,7 @@ int get_wlan_config(struct wificonfig_t *wifi) {
     return (0);
   }
   preferences.getString("password", wifi->password, sizeof(wifi->password));
+  preferences.getBool("fixed_ip", wifi->fake_fixed_ip);
   preferences.end();
   return (1);
 }
@@ -129,8 +153,8 @@ int get_server_config(struct serverconfig_t *server) {
   }
   preferences.getString("displayname", server->displayname, sizeof(server->displayname));
   server->interval = preferences.getLong("interval");
-  if (server->interval < 60) {
-    server->interval = 900;
+  if (server->interval < 30) {
+    server->interval = 30;
   }
   preferences.end();
   return (1);
@@ -143,13 +167,13 @@ void draw_bat() {
   }
   float bat_float = int(bat_mV / 10); // scale to 3 digit
   bat_float /= 100;
-  display.fillRect(490, 460, 310, 20, GxEPD_WHITE);
+  //display.fillRect(490, 460, 310, 20, GxEPD_WHITE);
   display.setFont(&FreeMonoBold9pt7b);
   display.setTextColor(GxEPD_BLACK);
   display.setTextSize(0);
   display.setCursor(400, 479);
   display.print("RSSI ");
-  display.print(WiFi.RSSI());
+  display.print(rssi);
   display.setCursor(500, 479);
   display.print("Ver ");
   display.print(VERSION);
@@ -163,7 +187,8 @@ void draw_bat() {
 }
 
 void draw_flash() {
-  display.fillTriangle(780+5, 460, 780, 460+9, 780+5, 460+9, GxEPD_BLACK);
+  if(uart_avail)
+    display.fillTriangle(780+5, 460, 780, 460+9, 780+5, 460+9, GxEPD_BLACK);
   display.fillTriangle(780+5, 460+7, 780+5, 460+19, 780+10, 460+7, GxEPD_BLACK);
   display.fillTriangle(780+3, 460+16, 780+5, 460+19, 780+7, 460+16, GxEPD_BLACK);
 }
@@ -237,34 +262,34 @@ struct bmp_image_header_t {
 };
 #pragma pack() //back to whatever the previous packing mode was
 
-int draw_image(imagedata_t *im) {
+int draw_bmp(imagedata_t *im) {
   //int drawBMP( int x, int y, uint8_t* data, long image_size) {
   bmp_file_header_t *bmp_file_header = (bmp_file_header_t *)im->image;
   bmp_image_header_t *bmp_image_header = (bmp_image_header_t *)&(im->image)[14];
   if (bmp_file_header->signature != 0x4D42) { // "BM"
-    Serial.printf("unknown file type %d\r\n", bmp_file_header->signature);
+    SERIALPRINTF("unknown file type %d\r\n", bmp_file_header->signature);
     return (-1);
   }
   if (bmp_image_header->bits_per_pixel > 4) {
-    Serial.println("to much colors");
+    SERIALPRINTLN("to much colors");
     return (-2);
   }
   byte bit_per_pixel = bmp_image_header->bits_per_pixel;
   if (bmp_image_header->compression_method != 0) {
-    Serial.println("compression not supported");
+    SERIALPRINTLN("compression not supported");
     return (-3);
   }
-  Serial.println("");
+  SERIALPRINTLN("");
 
-  Serial.printf("imagesize: %d\r\n", bmp_file_header->file_size);
-  Serial.printf("offset: %d\r\n", bmp_file_header->image_offset);
+  SERIALPRINTF("imagesize: %d\r\n", bmp_file_header->file_size);
+  SERIALPRINTF("offset: %d\r\n", bmp_file_header->image_offset);
 
   int width = bmp_image_header->image_width;
   int height = bmp_image_header->image_height;
   if (height < 0) {
     height = 0 - height;
   }
-  Serial.printf("%dx%d/%d at %d (%d)\r\n", width, height, bit_per_pixel, bmp_file_header->image_offset, bmp_file_header->file_size);
+  SERIALPRINTF("%dx%d/%d at %d (%d)\r\n", width, height, bit_per_pixel, bmp_file_header->image_offset, bmp_file_header->file_size);
   delay(20);
   /*if(bit_per_pixel == 1) {
     //display.writeImage(&data[bmp_file_header->image_offset], 0, 0, width, height);
@@ -329,16 +354,64 @@ int draw_image(imagedata_t *im) {
   return(0);
 }
 
+typedef struct my_private_struct
+{
+  int xoff, yoff; // corner offset
+} PRIVATE;
+
+void PNGDraw(PNGDRAW *pDraw) {
+  if(!pDraw->y) {
+    SERIALPRINTF("Width:%d Pitch:%d Type:%d BPP:%d\r\n", pDraw->iWidth, pDraw->iPitch,  pDraw->iPixelType, pDraw->iBpp);
+  }
+  // writeImage writes direct to hw and get overwritten by display.display()
+  //display.writeImage(&(pDraw->pPixels[0]), 0, pDraw->y, pDraw->iWidth, 1, false);
+  
+  for(int x = 0; x < pDraw->iPitch; ++x) {
+    for(int ib = 0; ib < 8; ++ib) {
+      if(pDraw->pPixels[x] & (1 << ib)) {
+        display.drawPixel(x*8+7-ib, pDraw->y, GxEPD_WHITE);
+      } else {
+        display.drawPixel(x*8+7-ib, pDraw->y, GxEPD_BLACK);
+      }
+    }
+  }
+}
+
+void draw_png(imagedata_t *im) {
+  SERIALPRINTLN("draw png");
+  int ret = png.openRAM((uint8_t *)im->image, im->image_size, PNGDraw);
+  if(ret== PNG_SUCCESS) {
+    SERIALPRINTF("image specs: (%d x %d), %d bpp, pixel type: %d\n", png.getWidth(), png.getHeight(), png.getBpp(), png.getPixelType());
+    display.setFullWindow();
+    display.fillScreen(GxEPD_WHITE);
+    png.decode((void *)NULL, 0);
+  } else {
+    SERIALPRINTLN("open failed");
+  }
+}
+
+void draw_image(imagedata_t *im) {
+  if(im->type == BMP) {
+    draw_bmp(im);
+  } else if(im->type == PNG) {
+    draw_png(im);
+    //display.refresh();
+  }
+}
+
 void go_to_sleep(uint32_t seconds) {
+  digitalWrite(RST, LOW);
+  if(in_otau) {
+    return;
+  }
   if(seconds) {
     esp_sleep_enable_timer_wakeup(FactorSeconds * seconds);
   }
-  if(is_loading) {
-    //esp_deep_sleep_enable_gpio_wakeup(BIT(KEY), ESP_GPIO_WAKEUP_GPIO_HIGH);
-  } else {
+  if(!is_loading) {
     esp_deep_sleep_enable_gpio_wakeup(BIT(KEY) | BIT(USB_PWR), ESP_GPIO_WAKEUP_GPIO_HIGH);
   }
-  //rtc_run_millis += millis();
+  esp_deep_sleep_disable_rom_logging();
+  rtc_run_millis += millis();
   esp_deep_sleep_start();
 }
 
@@ -356,13 +429,15 @@ void update_loop(void*z) {
 }
 
 void process_cmd(String &cmd) {
-  Serial.println("");
+  SERIALPRINTLN("");
   if(cmd == "restart") {
     ESP.restart();
   } else if(cmd.startsWith("ssid ")) {
     strcpy(wificonfig.ssid, cmd.substring(5).c_str());
   } else if(cmd.startsWith("pw ")) {
     strcpy(wificonfig.password, cmd.substring(3).c_str());
+  } else if(cmd.startsWith("ipfix ")) {
+    wificonfig.fake_fixed_ip = cmd.endsWith("y");
   } else if(cmd.startsWith("name ")) {
     strcpy(serverconfig.displayname, cmd.substring(5).c_str());
   } else if(cmd.startsWith("url ")) {
@@ -372,57 +447,61 @@ void process_cmd(String &cmd) {
   } else if(cmd.startsWith("update ")) {
     strcpy(serverconfig.update_url, cmd.substring(7).c_str());
   } else if(cmd == "show") {
-    Serial.print("AP: ");
-    Serial.println(wificonfig.ssid);
-    Serial.print("PW: ");
-    Serial.println(wificonfig.password);
-    Serial.print("IP: ");
-    Serial.println(WiFi.localIP());
-    Serial.print("Name: ");
-    Serial.println(serverconfig.displayname);
-    Serial.print("URL: ");
-    Serial.println(serverconfig.image_url);
-    Serial.print("Wake Interval: ");
-    Serial.println(serverconfig.interval);
-    Serial.print("Update URL: ");
-    Serial.println(serverconfig.update_url);
+    SERIALPRINT("AP: ");
+    SERIALPRINTLN(wificonfig.ssid);
+    SERIALPRINT("PW: ");
+    SERIALPRINTLN(wificonfig.password);
+    SERIALPRINT("IPFIX: ");
+    SERIALPRINTLN(wificonfig.fake_fixed_ip);
+    SERIALPRINT("IP: ");
+    SERIALPRINTLN(WiFi.localIP());
+    SERIALPRINT("Name: ");
+    SERIALPRINTLN(serverconfig.displayname);
+    SERIALPRINT("URL: ");
+    SERIALPRINTLN(serverconfig.image_url);
+    SERIALPRINT("Wake Interval: ");
+    SERIALPRINTLN(serverconfig.interval);
+    SERIALPRINT("Update URL: ");
+    SERIALPRINTLN(serverconfig.update_url);
   } else if(cmd == "save") {
     if(!preferences.begin("wificonfig")) {
-      Serial.println("unable to open Preferences for wifi config");
+      SERIALPRINTLN("unable to open Preferences for wifi config");
     } else {
       int x = preferences.putString("ssid", wificonfig.ssid);
       //int x = preferences.putBytes("ssid", wifi.ssid, strlen(wifi.ssid));
-      Serial.printf("stored ssid len %d\r\n", x);
+      SERIALPRINTF("stored ssid len %d\r\n", x);
       x = preferences.putString("password", wificonfig.password);
-      Serial.printf("stored passwd len %d\r\n", x);
+      SERIALPRINTF("stored passwd len %d\r\n", x);
+      x = preferences.putBool("fixed_ip", wificonfig.fake_fixed_ip);
+      SERIALPRINTF("stored IPFix len %d\r\n", x);
       preferences.end();
     }
     if(!preferences.begin("serverconfig")) {
-      Serial.println("unable to open Preferences for serverconfig");
+      SERIALPRINTLN("unable to open Preferences for serverconfig");
     } else {
       int x = preferences.putString("displayname", serverconfig.displayname);
-      Serial.printf("stored name len %d\r\n", x);
+      SERIALPRINTF("stored name len %d\r\n", x);
       x = preferences.putString("image_url", serverconfig.image_url);
-      Serial.printf("stored url len %d\r\n", x);
+      SERIALPRINTF("stored url len %d\r\n", x);
       x = preferences.putString("update_url", serverconfig.update_url);
-      Serial.printf("stored update len %d\r\n", x);
+      SERIALPRINTF("stored update len %d\r\n", x);
       x = preferences.putLong("interval", serverconfig.interval);
-      Serial.printf("stored interval %d\r\n", x);
+      SERIALPRINTF("stored interval %d\r\n", x);
       preferences.end();
     }
   } else if(cmd == "help") {
-    Serial.println("ssid <str>");
-    Serial.println("pw <str>");
-    Serial.println("name <str>");
-    Serial.println("url <uri>");
-    Serial.println("wake <int>");
-    Serial.println("update <uri>");
-    Serial.println("save");
-    Serial.println("restart");
-    Serial.println("");
+    SERIALPRINTLN("ssid <str>");
+    SERIALPRINTLN("pw <str>");
+    SERIALPRINTLN("name <str>");
+    SERIALPRINTLN("url <uri>");
+    SERIALPRINTLN("wake <int>");
+    SERIALPRINTLN("update <uri>");
+    SERIALPRINTLN("save");
+    SERIALPRINTLN("restart");
+    SERIALPRINTLN("");
   } else {
-    Serial.println(cmd);
-    Serial.println(" unknown (help?)");
+    SERIALPRINTLN(cmd);
+    SERIALPRINTLN(" unknown (help?)");
   }
   cmd = "";
 }
@@ -437,11 +516,11 @@ void serial_config(void*z) {
         process_cmd(cmd);
       } else if(c == 8) { // backspace
         cmd.remove(cmd.length() - 1);
-        Serial.print(c);
-        Serial.print(" ");
-        Serial.print(c);
+        SERIALPRINT(c);
+        SERIALPRINT(" ");
+        SERIALPRINT(c);
       } else {
-        Serial.print(c);
+        SERIALPRINT(c);
         cmd += c;
       }
     }
@@ -453,24 +532,24 @@ void serial_config(void*z) {
 /*
 int get_update(struct serverconfig_t *server) {
   int ok = 0;
-  Serial.println("check for update");
-  Serial.println(server->update_url);
+  SERIALPRINTLN("check for update");
+  SERIALPRINTLN(server->update_url);
   if (!strlen(server->update_url)) {
     return(0);
   }
   t_httpUpdate_return ret = ESPhttpUpdate.update(server->update_url, VERSION);
   switch (ret) {
     case HTTP_UPDATE_FAILED: 
-      Serial.printf("HTTP_UPDATE_FAILD Error (%d): %s\n", ESPhttpUpdate.getLastError(), ESPhttpUpdate.getLastErrorString().c_str());
+      SERIALPRINTF("HTTP_UPDATE_FAILD Error (%d): %s\n", ESPhttpUpdate.getLastError(), ESPhttpUpdate.getLastErrorString().c_str());
       break;
 
     case HTTP_UPDATE_NO_UPDATES:
-      Serial.println("HTTP_UPDATE_NO_UPDATES");
+      SERIALPRINTLN("HTTP_UPDATE_NO_UPDATES");
       ok = 1;
       break;
 
     case HTTP_UPDATE_OK:
-      Serial.println("HTTP_UPDATE_OK");
+      SERIALPRINTLN("HTTP_UPDATE_OK");
       ok = 1;
       break;
   }
@@ -478,8 +557,8 @@ int get_update(struct serverconfig_t *server) {
 }*/
 
 int fetch_image(struct imagedata_t *im) {
-  Serial.println("check for image");
-  Serial.println(serverconfig.image_url);
+  SERIALPRINTLN("check for image");
+  SERIALPRINTLN(serverconfig.image_url);
   int tries = 3;
   int got_response = 0;
   char image_time_str[32];
@@ -487,11 +566,12 @@ int fetch_image(struct imagedata_t *im) {
   char voltage[16];
   HTTPClient http;
   im->sleep = 60;
+  im->type = UNKNOWN;
   //time_t image_time_tm = im->image_time;
   //time_t interval_time_tm = im->next_interval;
   //strftime(image_time_str, sizeof(image_time_str), "%a, %d %b %Y %H:%M:%S GMT", gmtime(&image_time_tm));
-  //Serial.print("Image time was:");
-  //Serial.println(image_time_str);
+  //SERIALPRINT("Image time was:");
+  //SERIALPRINTLN(image_time_str);
   //if (!im->next_interval) {
     // if not send by server it defaults to this set in config
   //  interval_time_tm = (int(((now + 10) / server->interval)) + 1 ) * server->interval;
@@ -501,34 +581,30 @@ int fetch_image(struct imagedata_t *im) {
   while (tries) {
     tries--;
     http.begin(serverconfig.image_url);
-    const char* headerNames[] = {"Content-Length", "ContentHash", "Sleep", "NewVersion", "Version"};
+    const char* headerNames[] = {"Date", "Content-Length", "Content-Type", "ContentHash", "Sleep", "NewVersion", "Version"};
     http.collectHeaders(headerNames, sizeof(headerNames) / sizeof(headerNames[0]));
     sprintf(voltage, "%d", bat_mV);
     // If-Modified-Since: Wed, 21 Oct 2015 07:28:00 GMT
-    //http.addHeader("If-Modified-Since", image_time_str);
+    http.addHeader("If-Modified-Since", rtc_image_time);
     http.addHeader("DisplayName", serverconfig.displayname);
     http.addHeader("Version", VERSION);
     http.addHeader("ContentHash", rtc_contenthash);
-    //http.addHeader("Nextinterval", next_interval_str);
+    http.addHeader("RSSI", String(rssi));
+    http.addHeader("WiFiFail", String(rtc_wifi_fail));
+    http.addHeader("WiFiTime", String(wifi_connect_time));
+    http.addHeader("RunMillis", String(rtc_run_millis));
     http.addHeader("BatteriePower", voltage);
-    //http.addHeader("Wakeup", wakeup_by.c_str());
+    http.addHeader("Wakeup", wakeup_by);
     int httpCode = http.GET();
     if (httpCode > 0) {
       // HTTP header has been send and Server response header has been handled
       got_response = 1;
       SERIALPRINTF("[HTTP] GET... code: %d\r\n", httpCode);
       if (httpCode == 304) {
+        http.end();
         return (2);
       }
-      // set date based on server time
-      //char date[50];
-      //http.header("Date").toCharArray(date, sizeof(date));
-      //now = convert_datestr2time(date);
-      //struct timeval tv;
-      //tv.tv_sec = now;
-      //tv.tv_usec = 0;
-      //struct timezone tz = {0};
-      //settimeofday(&tv, NULL);
+      http.header("Date").toCharArray(rtc_image_time, sizeof(rtc_image_time));
       int content_len = http.getSize();
       if(content_len == -1) {
         content_len = IMAGESIZE;
@@ -544,15 +620,15 @@ int fetch_image(struct imagedata_t *im) {
         im->sleep = serverconfig.interval;
       }
       if (httpCode == HTTP_CODE_OK) {
-        Serial.println("load the image");
+        SERIALPRINTLN("load the image");
         WiFiClient w = http.getStream();
         int s = 0;
         int sz = 0;
         delay(10);
-        im->image = (uint8_t*)malloc(IMAGESIZE);
+        im->image = (uint8_t*)malloc(content_len);
         uint8_t *imptr = im->image;
         //s = w.read(imptr, IMAGESIZE - s);
-        s = w.readBytes(imptr, IMAGESIZE - s);
+        s = w.readBytes(imptr, content_len - s);
         sz += s;
         SERIALPRINTF("read %d(%d of %d)\r\n", s, sz, content_len);
         imptr += s;
@@ -561,9 +637,10 @@ int fetch_image(struct imagedata_t *im) {
           if (s <= 0) {
             delay(50);
             receive_tries--;
+            yield();
           }
           //s = w.read(imptr, sizeof(*im->image) - s);
-          s = w.readBytes(imptr, IMAGESIZE - s);
+          s = w.readBytes(imptr, content_len - s);
           if (s > 0) {
             sz += s;
             imptr += s;
@@ -575,9 +652,17 @@ int fetch_image(struct imagedata_t *im) {
           }
         }
         im->image_size = sz;
-        Serial.printf("read sum %d (%d)\r\n", sz, content_len);
+        SERIALPRINTF("read sum %d (%d)\r\n", sz, content_len);
         if (sz >= content_len) {
           http.header("ContentHash").toCharArray(im->contenthash, sizeof(im->contenthash));
+          SERIALPRINT("Content-Type:");
+          SERIALPRINTLN(http.header("Content-Type"));
+          if(http.header("Content-Type").endsWith("bmp")) {
+            im->type = BMP;
+          } else if(http.header("Content-Type").endsWith("png")) {
+            im->type = PNG;
+          }
+          http.end();
           return (1);
         }
       }
@@ -586,6 +671,7 @@ int fetch_image(struct imagedata_t *im) {
     } else {
       SERIALPRINTLN("[HTTP] got no response");
     }
+    http.end();
   }
   if(!got_response) {
     displayInfo(NoHttpResponse);
@@ -597,7 +683,14 @@ int fetch_image(struct imagedata_t *im) {
 void fetchAndDraw() {
   if(server_is_configured) {
     imagedata_t image;
+    digitalWrite(D0, HIGH);
     int ret = fetch_image(&image);
+    digitalWrite(D0, LOW);
+    if(!IS_USB_CONNECTED) {
+      WiFi.mode(WIFI_OFF);
+    }
+    digitalWrite(RST, HIGH);
+    display.init();
     if(ret == 1) {
       draw_image(&image);
       SERIALPRINTLN("draw done");
@@ -606,43 +699,57 @@ void fetchAndDraw() {
         draw_flash();
       }
       strcpy(rtc_contenthash, image.contenthash);
+      SERIALPRINTLN("display::display");
+      digitalWrite(D0, HIGH);
       display.display();
-      digitalWrite(RST, LOW);
+      SERIALPRINTLN("display::display done");
+      if(!is_loading) {
+        digitalWrite(RST, LOW);
+      }
     } else if(ret == 2) {
       SERIALPRINTLN("no change");
     } else {
       displayInfo(NoHttpResponse);
     }
     if(!is_loading) {
-      Serial.printf("sleep %d seconds\r\n", image.sleep);
+      SERIALPRINTF("sleep %d seconds\r\n", image.sleep);
       go_to_sleep(image.sleep);
     } else {
-      Serial.printf("no sleep %d seconds because usb connected\r\n", image.sleep);
+      SERIALPRINTF("no sleep %d seconds because usb connected\r\n", image.sleep);
       next_draw = millis() + image.sleep * 1000;
     }
   } else {
+    digitalWrite(RST, HIGH);
+    display.init();
     displayInfo(NoServerConfig);
   }
 }
 
 void WiFiGotIP(WiFiEvent_t event, WiFiEventInfo_t info) {
   SERIALPRINTLN("WiFi connected");
-  //Serial.printf("WiFiIP: %lu\r\n", millis());
+  //SERIALPRINTF("WiFiIP: %lu\r\n", millis());
   SERIALPRINT("IP address: ");
   SERIALPRINTLN(IPAddress(info.got_ip.ip_info.ip.addr));
   SERIALPRINT("Hostname: ");
   SERIALPRINTLN(WiFi.getHostname());
+  digitalWrite(D0, LOW);
+  wifi_connect_time = millis() - wifi_start;
   wifi_wait = false;
-  //  local_IP = info.got_ip.ip_info.ip.addr;
-  //  subnet = info.got_ip.ip_info.netmask.addr;
-  //  gateway = info.got_ip.ip_info.gw.addr;
+  local_IP = info.got_ip.ip_info.ip.addr;
+  subnet = info.got_ip.ip_info.netmask.addr;
+  gateway = info.got_ip.ip_info.gw.addr;
+  dns1 = WiFi.dnsIP(0);
+  dns2 = WiFi.dnsIP(1);
+  rssi = WiFi.RSSI();
   fetchAndDraw();
 }
 
 void setup() {
   setCpuFrequencyMhz(80);
+  digitalWrite(D0, HIGH);
+  pinMode(D0, OUTPUT);
   pinMode(USB_PWR, INPUT);
-  digitalWrite(RST, HIGH);
+  digitalWrite(RST, LOW);
   pinMode(RST, OUTPUT);
   digitalWrite(CS, HIGH);
   pinMode(CS, OUTPUT);
@@ -653,22 +760,57 @@ void setup() {
   pinMode(BAT_VOLT, ANALOG);
   if(IS_USB_CONNECTED) {
     Serial.begin(115200);
-    Serial.println("Init");
+    SERIALPRINTLN("Init");
     portal_on_time_ms = 7200000; // just set it to 2 hour if on USB
+    //if(uart_is_driver_installed(1)) {
+    if(uart_wait_tx_done(UART_NUM_0, 100)) {
+      Serial.println("uart ok");
+      uart_avail = true;
+    //} else {
+      //Serial.println("uart nok");
+    }
+    //}
     is_loading = true;
   }
-  //esp_sleep_wakeup_cause_t wakeup_reason;
-  //wakeup_reason = esp_sleep_get_wakeup_cause();
+  esp_sleep_wakeup_cause_t wakeup_reason;
+  wakeup_reason = esp_sleep_get_wakeup_cause();
+  switch(wakeup_reason) {
+    case ESP_SLEEP_WAKEUP_UNDEFINED:
+      SERIALPRINTLN("reboot from reset");
+      wakeup_by = "Reset";
+      break;
+    case ESP_SLEEP_WAKEUP_GPIO:
+      SERIALPRINTLN("reboot from GPIO");
+      wakeup_by = "GPIO";
+    case ESP_SLEEP_WAKEUP_TIMER:
+      SERIALPRINTLN("reboot from Timer");
+      wakeup_by = "Timer";
+    default:
+      wakeup_by = String(wakeup_reason);
+      break;
+  }
+  digitalWrite(RST, HIGH);
+  delayMicroseconds(10);
   analogReadResolution(12);
   analogSetAttenuation(ADC_11db);
   bat_mV = analogRead(BAT_VOLT) / 0.716; // 2973 / 4.15V
+  digitalWrite(RST, LOW);
   if(digitalRead(KEY)) {
     delay(1000);
     if(digitalRead(KEY)) {
       rtc_contenthash[0] = '\0';
+      local_IP = IPADDR_NONE;
     }
   }
+  //SPI.end(); // release standard SPI pins, e.g. SCK(18), MISO(19), MOSI(23), SS(5)
+  //SPI: void begin(int8_t sck=-1, int8_t miso=-1, int8_t mosi=-1, int8_t ss=-1);
+  SERIALPRINTLN("init SPI");
+  SPI.begin(CLK, DIN, DIN, CS); // map and init SPI pins SCK(13), MISO(12), MOSI(14), SS(15)
+  SPI.setHwCs(true);
+  //SPI.setFrequency(10000);
   if(!is_loading && bat_mV < 3200) {
+    digitalWrite(RST, HIGH);
+    display.init();
     displayInfo(EmptyBat);
     go_to_sleep(0);
   }
@@ -676,14 +818,28 @@ void setup() {
   wificonfig.ssid[0] = '\0';
   if (get_wlan_config(&wificonfig)) {
     WiFi.mode(WIFI_STA);
-    WiFi.begin(wificonfig.ssid, wificonfig.password);
+    if(0 && wificonfig.fake_fixed_ip && (local_IP != IPADDR_NONE)) {
+      SERIALPRINTLN("using stored ip");
+      WiFi.config(local_IP, gateway, subnet, dns1, dns2);
+    }
+    if(1 || rtc_wifi_failed) {
+      rtc_wifi_failed = false;
+      WiFi.begin(wificonfig.ssid, wificonfig.password);
+    } else {
+      SERIALPRINTLN("using stored ssid");
+      WiFi.begin();
+    }
     //WiFi.setHostname(sys_config.hostname);
     //WiFi.onEvent(WiFiGotIP, WiFiEvent_t::SYSTEM_EVENT_STA_GOT_IP);
     WiFi.onEvent(WiFiGotIP, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_GOT_IP);
     wifi_start = millis();
     wifi_wait = true;
+  } else {
+    wificonfig.fake_fixed_ip = true; // set to default
   }
   if (!get_server_config(&serverconfig)) {
+    digitalWrite(RST, HIGH);
+    display.init();
     displayInfo(NoServerConfig);
   } else {
     server_is_configured = true;
@@ -699,42 +855,31 @@ void setup() {
           type = "filesystem";
 
         // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
-        Serial.println("Start updating " + type);
+        SERIALPRINTLN("Start updating " + type);
         in_otau = true;
       })
       .onEnd([]() {
-        Serial.println("\nEnd");
+        SERIALPRINTLN("\nEnd");
       })
       .onProgress([](unsigned int progress, unsigned int total) {
         SERIALPRINTF("Progress: %u%%\r", (progress / (total / 100)));
       })
       .onError([](ota_error_t error) {
-        Serial.printf("Error[%u]: ", error);
-        if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
-        else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-        else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-        else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-        else if (error == OTA_END_ERROR) Serial.println("End Failed");
+        SERIALPRINTF("Error[%u]: ", error);
+        if (error == OTA_AUTH_ERROR) SERIALPRINTLN("Auth Failed");
+        else if (error == OTA_BEGIN_ERROR) SERIALPRINTLN("Begin Failed");
+        else if (error == OTA_CONNECT_ERROR) SERIALPRINTLN("Connect Failed");
+        else if (error == OTA_RECEIVE_ERROR) SERIALPRINTLN("Receive Failed");
+        else if (error == OTA_END_ERROR) SERIALPRINTLN("End Failed");
         in_otau = false;
       });
 
     ArduinoOTA.begin();
-    Serial.println("OTAU Ready");
+    SERIALPRINTLN("OTAU Ready");
+    xTaskCreate(update_loop, "update", 4096, NULL, 10, NULL);
   }
 
-  //SPI.end(); // release standard SPI pins, e.g. SCK(18), MISO(19), MOSI(23), SS(5)
-  //SPI: void begin(int8_t sck=-1, int8_t miso=-1, int8_t mosi=-1, int8_t ss=-1);
-  SPI.begin(CLK, DIN, DIN, CS); // map and init SPI pins SCK(13), MISO(12), MOSI(14), SS(15)
-  SPI.setHwCs(true);
-  //SPI.setFrequency(10000);
-  delay(100);
-  SERIALPRINTLN("init epd");
-  digitalWrite(RST, HIGH);
-  display.init();
-  //pinMode(BUSY, INPUT_PULLUP);
-  SERIALPRINTLN("init epd done");
   if(IS_USB_CONNECTED) {
-    xTaskCreate(update_loop, "update", 4096, NULL, 10, NULL);
     xTaskCreate(serial_config, "serial_config", 4096, NULL, 10, NULL);
     //displayInfo(SerialConfig);
   }
@@ -751,6 +896,8 @@ void loop() {
   uint32_t ti = millis();
   if(wifi_wait && ((ti - wifi_start) > 20000)) {
     SERIALPRINTLN("WiFi Connection Failed! Delayed Rebooting...");
+    rtc_wifi_fail++;
+    rtc_wifi_failed = true;
     go_to_sleep(10);
   }
   if(next_draw && (ti > next_draw)) {
