@@ -24,11 +24,6 @@ if(isset($_SERVER["HTTP_CONTENTHASH"])) {
 } else {
     $contenthash = "";
 }
-if(isset($_SERVER["HTTP_NEXTSCHEDULE"])) {
-        $next_schedule = $_SERVER["HTTP_NEXTSCHEDULE"];
-} else {
-        $next_schedule = "";
-}
 if(isset($_SERVER["HTTP_WIFIFAIL"])) {
     $wifi_fail = $_SERVER["HTTP_WIFIFAIL"];
 } else {
@@ -177,15 +172,10 @@ if($hour > 22) {
   $dt_utc->modify("+90 minute");
 }
 $datestr = $dt_utc->format("D, d M Y H:i:s \G\M\T");
-$delta_schedule = abs($dt->getTimestamp() - $scheduletimestamp);
-
 
 error_log("Display: " .$displayname);
 error_log("Version: " .$versionstr);
 error_log("wakeup: " . $wakeup_by);
-error_log("Mod planned NextSchedule: " .$next_schedule);
-error_log("Server planned NextSchedule: " .$datestr);
-error_log("delta Schedule: " .$delta_schedule);
 $hash = md5("1" . json_encode($arr) . $terrassentuer . $schwimmbadfenster . $todaystr);
 error_log(json_encode($arr) . $todaystr);
 error_log("Batterie: " . $voltage);
@@ -193,7 +183,7 @@ error_log("WiFiFail: " . $wifi_fail);
 error_log("WiFiTime: " . $wifi_time);
 error_log("RunMillis: " . $run_millis);
 error_log("ContentHash: " . $contenthash);
-if(1 && ($contenthash == $hash) && (($delta_schedule < 1500000000) || ($delta_schedule > 300))) {
+if(1 && ($contenthash == $hash)) {
     error_log("no change, 304");
     header($_SERVER["SERVER_PROTOCOL"].' 304 ot Modified', true, 304);
     exit;
@@ -209,10 +199,7 @@ error_log("image age:" . $diff);
 #error_log("imagetime " . $imagetime->format("D, d M Y H:i:s \G\M\T"));
 
 header("Sleep: " . 60);
-#error_log("NextSchedule: " . $datestr);
-
-header("NewVersion: 1.11");
-
+header("NewVersion: 0.04");
 
 error_log("creating image");
 header( "HTTP/1.0 200 OK" );
@@ -296,7 +283,7 @@ if(1) {
     echo($blob);
     exit;
 }
-  
+
 $l =  imagesx($im) * imagesy($im) / 8 + 62;
 header("Content-Length: " . $l);
 echo(imageBMP2($im, ($displayname == "Mirror")));
