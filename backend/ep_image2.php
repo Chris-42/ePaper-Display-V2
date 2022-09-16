@@ -49,6 +49,11 @@ if(isset($_SERVER["HTTP_WAKEUP"])) {
 } else {
     $wakeup_by = "?";
 }
+if(isset($_SERVER["HTTP_RSSI"])) {
+    $rssi = $_SERVER["HTTP_RSSI"];
+} else {
+    $rssi = 0;
+}
 
 #header($_SERVER["SERVER_PROTOCOL"].' 304 ot Modified', true, 304);
 #$imagedatestr = "Thu, 01 Jan 1970 01:00:00 GMT";
@@ -68,10 +73,10 @@ $fontL = "/var/www/fonts/ubuntu-font-family/Ubuntu-L.ttf";
 
 
 
-$dbHost="*";
-$dbName="*";
-$dbUser="*";
-$dbPassword = "*";
+$dbHost="host";
+$dbName="db";
+$dbUser="db_user";
+$dbPassword = "pass";
 
 $connection;
 
@@ -137,9 +142,9 @@ while($row = mysqli_fetch_object($result)) {
         $a['days'] = $a['days'] . " Tage";
     }
     if($a['who'] == "cp") {
-        $a['who'] = "*:";
+        $a['who'] = "Christian:";
     } elseif ( $a['who'] == "bp") {
-        $a['who'] = "*:";
+        $a['who'] = "Birgit:";
     } elseif ( $a['who'] == "waste") {
         $a['who'] = "Müll:";
     }
@@ -147,16 +152,16 @@ while($row = mysqli_fetch_object($result)) {
 }
 
 $curl = curl_init();
-curl_setopt($curl, CURLOPT_URL, "http://localhost:18080/rest/items/");
+curl_setopt($curl, CURLOPT_URL, "http://localhost:18080/rest/items/SchwimmbadFensterkontakt_1_State/state");
 curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
 $schwimmbadfenster = curl_exec($curl);
-curl_setopt($curl, CURLOPT_URL, "http://localhost:18080/rest/items/");
+curl_setopt($curl, CURLOPT_URL, "http://localhost:18080/rest/items/Terassentuer_1_State/state");
 curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
 $terrassentuer = curl_exec($curl);
 curl_close($curl);
 error_log("terrassentuer: " . $terrassentuer);
 
-$scheduletimestamp = strtotime($next_schedule);
+#$scheduletimestamp = strtotime($next_schedule);
 $dt = new \DateTime(null, new \DateTimeZone(TIMEZONE));
 $todaystr = $dt->format("d.m.Y");
 $dt_utc = new \DateTime(null, new \DateTimeZone("UTC"));
@@ -172,10 +177,14 @@ if($hour > 22) {
   $dt_utc->modify("+90 minute");
 }
 $datestr = $dt_utc->format("D, d M Y H:i:s \G\M\T");
+#$delta_schedule = abs($dt->getTimestamp() - $scheduletimestamp);
+
 
 error_log("Display: " .$displayname);
 error_log("Version: " .$versionstr);
 error_log("wakeup: " . $wakeup_by);
+error_log("rssi: " . $rssi);
+#error_log("delta Schedule: " .$delta_schedule);
 $hash = md5("1" . json_encode($arr) . $terrassentuer . $schwimmbadfenster . $todaystr);
 error_log(json_encode($arr) . $todaystr);
 error_log("Batterie: " . $voltage);
@@ -183,6 +192,7 @@ error_log("WiFiFail: " . $wifi_fail);
 error_log("WiFiTime: " . $wifi_time);
 error_log("RunMillis: " . $run_millis);
 error_log("ContentHash: " . $contenthash);
+#if(0 && ($contenthash == $hash) && (($delta_schedule < 1500000000) || ($delta_schedule > 300))) {
 if(1 && ($contenthash == $hash)) {
     error_log("no change, 304");
     header($_SERVER["SERVER_PROTOCOL"].' 304 ot Modified', true, 304);
@@ -197,13 +207,15 @@ $diff = $now - $imagetime;
 error_log("imagetimestr " . $imagedatestr);
 error_log("image age:" . $diff);
 #error_log("imagetime " . $imagetime->format("D, d M Y H:i:s \G\M\T"));
-
+    
+error_log("Server planned sleep: 60");
 header("Sleep: " . 60);
+
 header("NewVersion: 0.04");
+
 
 error_log("creating image");
 header( "HTTP/1.0 200 OK" );
-header ("Content-type: image/bmp");
 #header ("Content-type: image/png");
 #imagecopyresampled($im, $im0, 0, 0, 0, 0, 800, 480, imagesx($im0), imagesy($im0));
 #$im = ImageCreateFromPNG($displayname . ".png")
@@ -212,86 +224,76 @@ or die ("Kann keinen neuen GD-Bild-Stream erzeugen");
 $background_color = ImageColorAllocate ($im, 255, 255, 255);
 $text_color = ImageColorAllocate ($im, 0, 0, 0);
 ImageFill($im, 0, 0, $background_color);
-if($displayname == "Mirror") {
-    imagettftext ($im , 40 , 90 , 130 , 320 , $text_color , $fontR , $todaystr );
-    if($rows) {
-        for($i = 0; $i < $rows; $i++) {
-            imagettftext ($im , 32 , 90 , 180+85*$i , 380, $text_color , $fontB, $arr[$i]['days'] );
-            imagettftext ($im , 32 , 90 , 180+85*$i , 190, $text_color , $fontB , $arr[$i]['who'] );
-            imagettftext ($im , 32 , 90 , 220+85*$i , 340, $text_color , $fontB , $arr[$i]['name'] );
-        }
-    }
-    $bat_bar = intval(($voltage - 2850) / 6);
-    if($bat_bar > 30) {
-        $bat_bar = 30;
-    }
-    ImageRectangle($im, 627, 2, 636, 34, $text_color);
-    if($bat_bar > 0) {
-        ImageFilledRectangle($im, 628, 33 - $bat_bar, 635, 33, $text_color);
-    }
+ImageRectangle($im, 0, 0, 799, 479, $text_color);
+imagettftext ($im , 40 , 0 , 31 , 60 , $text_color , $fontB , "Casa Port");
+imagettftext ($im , 32 , 0 , 410 , 60 , $text_color , $fontR , $todaystr );
+
+ImageFilledRectangle($im, 0, 80, 799, 82, $text_color);
+
+if(!$rows) {
+# empty first line
+    imagettftext ($im , 24 , 0 , 31 , 140 , $text_color , $fontR, "Heute" );
+    ImageRectangle($im, 175, 110, 175, 220, $text_color);
+    
+    imagettftext ($im , 24 , 0 , 190 , 180 , $text_color , $fontR , "Nix los." );
+    imagettftext ($im , 16 , 0 , 190 , 213 , $text_color , $fontR , "Herzlich willkommen!" );
 } else {
-    ImageRectangle($im, 0, 0, 799, 479, $text_color);
-    #imagettftext ($im , 40 , 0 , 31 , 70 , $text_color , $fontB , "Raum " . $displayname);
-    imagettftext ($im , 40 , 0 , 31 , 60 , $text_color , $fontB , "Casa Port");
-    //ImageFilledRectangle($im, 370, 20, 638, 70, $background_color);
-    imagettftext ($im , 32 , 0 , 410 , 60 , $text_color , $fontR , $todaystr );
-
-    ImageFilledRectangle($im, 0, 80, 639, 82, $text_color);
-
-    if(!$rows) {
-    # empty first line
-        imagettftext ($im , 24 , 0 , 31 , 140 , $text_color , $fontR, "Heute" );
-        ImageRectangle($im, 175, 110, 175, 220, $text_color);
-    
-        imagettftext ($im , 24 , 0 , 190 , 180 , $text_color , $fontR , "Nix los." );
-        imagettftext ($im , 16 , 0 , 190 , 213 , $text_color , $fontR , "Herzlich willkommen!" );
-    } else {
-        for($i = 0; $i < $rows; $i++) {
-    # only first line
-            imagettftext ($im , 24 , 0 , 21 , 130+35*$i , $text_color , $fontB, $arr[$i]['days'] );
-            #ImageRectangle($im, 175, 110, 175, 220, $text_color);
-    
-            imagettftext ($im , 24 , 0 , 140 , 130+35*$i , $text_color , $fontB , $arr[$i]['who'] );
-            imagettftext ($im , 24 , 0 , 290 , 130+35*$i , $text_color , $fontB , $arr[$i]['name'] );
-            #imagettftext ($im , 24 , 0 , 190 , 180 , $text_color , $fontR , utf8_decode($arr[0]['title'] ));
-            #imagettftext ($im , 16 , 0 , 190 , 213 , $text_color , $fontR , utf8_decode($arr[0]['attendies'] ));
-        }
-    }
-
-    if($terrassentuer == "OPEN") {
-        $icon1 = imagecreatefrompng('tuer_offen.png');
-        imagecopy($im, $icon1, 590, 250, 0, 0, 50, 50);
-    }
-    
-    if($schwimmbadfenster == "OPEN") {
-        $icon1 = imagecreatefrompng('tuer_offen.png');
-        imagecopy($im, $icon1, 590, 300, 0, 0, 50, 50);
+    for($i = 0; $i < $rows; $i++) {
+        # only first line
+        imagettftext ($im , 24 , 0 , 21 , 130+35*$i , $text_color , $fontB, $arr[$i]['days'] );
+        #ImageRectangle($im, 175, 110, 175, 220, $text_color);
+        
+        imagettftext ($im , 24 , 0 , 140 , 130+35*$i , $text_color , $fontB , $arr[$i]['who'] );
+        imagettftext ($im , 24 , 0 , 290 , 130+35*$i , $text_color , $fontB , $arr[$i]['name'] );
+        #imagettftext ($im , 24 , 0 , 190 , 180 , $text_color , $fontR , utf8_decode($arr[0]['title'] ));
+        #imagettftext ($im , 16 , 0 , 190 , 213 , $text_color , $fontR , utf8_decode($arr[0]['attendies'] ));
     }
 }
 
-#imagePNG($im);
+if($terrassentuer == "OPEN") {
+    $icon1 = imagecreatefrompng('tuer_offen.png');
+    imagecopy($im, $icon1, 590, 250, 0, 0, 50, 50);
+}
+
+if($schwimmbadfenster == "OPEN") {
+    $icon1 = imagecreatefrompng('tuer_offen.png');
+    imagecopy($im, $icon1, 590, 300, 0, 0, 50, 50);
+}
+
 if(1) {
-    imagefilter($im, IMG_FILTER_GRAYSCALE);
-    imagetruecolortopalette($im, false, 2);
-    header ("Content-type: image/png");
-    ob_start();
-    imagePNG($im);
-    $blob = ob_get_contents();
-    error_log(ob_get_length());
-    header("Content-Length: " . ob_get_length());
-    ob_end_clean();
-    echo($blob);
-    exit;
+  imagefilter($im, IMG_FILTER_GRAYSCALE);
+  imagetruecolortopalette($im, false, 2);
+  header ("Content-type: image/png");
+  ob_start();
+  imagePNG($im);
+  $blob = ob_get_contents();
+  header("Content-Length: " . ob_get_length());
+  error_log("len:" . ob_get_length());
+  ob_end_clean();
+  echo($blob);
+  exit;
 }
 
+header ("Content-type: image/bmp");
 $l =  imagesx($im) * imagesy($im) / 8 + 62;
 header("Content-Length: " . $l);
+error_log("len:" . $l);
+#header("Content-Encoding: gzip");
+#echo(gzencode(imageBMP2($im, ($displayname == "Mirror"))));
 echo(imageBMP2($im, ($displayname == "Mirror")));
-exit();
-
-
-function imageBMP2($im, $negate) {
-    $bits = "";
+#$x = imageBMP2($im, ($displayname == "Mirror"));
+#for($q = 0; $q < $l; $q++) {
+    #    echo($x[$i]);
+    #    if(!($q%5000)) {
+        #        flush();
+        #        sleep(1);
+        #    }
+        #}
+        exit();
+        
+        
+        function imageBMP2($im, $negate) {
+            $bits = "";
     $bytes = "";
     $pixelcount = 0;
     #
@@ -300,7 +302,7 @@ function imageBMP2($im, $negate) {
     $bytes .= pack('V', imagesx($im) * imagesy($im) / 8 + 54 + 8); #uint32_t file_size;
     $bytes .= pack('V', 0); #uint32_t reserved;
     $bytes .= pack('V', 54+8); #uint32_t image_offset;
-
+    
     #picture header
     $bytes .= pack('V', 40); #uint32_t header_size;
     $bytes .= pack('V', imagesx($im)); #int32_t image_width;
@@ -313,21 +315,21 @@ function imageBMP2($im, $negate) {
     $bytes .= pack('V', 0); #uint32_t vertical_resolution;
     $bytes .= pack('V', 0); #uint32_t colors_in_palette;
     $bytes .= pack('V', 0); #uint32_t important_colors;
-
+    
     # unknown fill bytes
     $bytes .= pack('V', 0); #uint32_t ?;
     $bytes .= pack('V', 0xffffff); #uint32_t ?;
-
+    
     # image data
     for ($y = 0; $y < imagesy($im); $y++) {
         for ($x = 0; $x < imagesx($im); $x++) {
-
+            
             $rgb = imagecolorat($im, $x, $y);
             $r = ($rgb >> 16) & 0xFF;
             $g = ($rgb >> 8 ) & 0xFF;
             $b = $rgb & 0xFF;
             $gray = ($r + $g + $b) / 3;
-
+            
             if($negate) {
                 if ($gray < 0x0e) {
                     $bits .= "1";
