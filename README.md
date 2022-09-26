@@ -38,3 +38,8 @@ wake 1 min + redraw once a hour:<br>
  <br>
  wake 1 min + redraw twice a hour:<br>
  t = 12000 / (60 + 10 + 5) = 160d<br>
+<br>
+real measurement:<br>
+ 1 minute interval, 5h runtime, 5 display refresh<br>
+  ~ 28000mC -> 80d, looking at wifi establish time it varies between 147msec and 9.6 seconds with a average of 2,5sec
+

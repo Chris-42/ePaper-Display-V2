@@ -756,7 +756,6 @@ void WiFiGotIP(WiFiEvent_t event, WiFiEventInfo_t info) {
 }
 
 void setup() {
-  setCpuFrequencyMhz(80);
   digitalWrite(D0, HIGH);
   pinMode(D0, OUTPUT);
   pinMode(USB_PWR, INPUT);
@@ -905,6 +904,7 @@ void loop() {
   if(wifi_wait && ((ti - wifi_start) > 20000)) {
     SERIALPRINTLN("WiFi Connection Failed! Delayed Rebooting...");
     rtc_wifi_fail++;
+    wifi_wait = false;
     rtc_wifi_failed = true;
     if(!is_loading) {
       go_to_sleep(10);
