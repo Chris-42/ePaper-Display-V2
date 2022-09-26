@@ -43,3 +43,4 @@ real measurement:<br>
  1 minute interval, 5h runtime, 5 display refresh<br>
   ~ 28000mC -> 80d, looking at wifi establish time it varies between 147msec and 9.6 seconds with a average of 2,5sec
 
+.
